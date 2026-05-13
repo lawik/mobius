@@ -182,20 +182,38 @@ defmodule Mobius.MetricsTable do
   Without this, the consolidator would store the same lifetime summary
   120 times in the seconds bucket, and per-minute summary CDPs would
   represent everything since process start rather than just the minute.
+
+  Summary rows are cleared via `:ets.take/2`, which atomically returns
+  the current value *and* removes the row in one step. That matters:
+  telemetry events can update a summary row at any moment, and a
+  `select`-then-`delete` would silently drop any update that landed in
+  between. `take` reports back exactly what was removed, so a late
+  update is captured in this snapshot instead of being lost.
   """
   @spec snapshot_for_scrape(Mobius.instance()) :: [metric_entry()]
   def snapshot_for_scrape(table) do
-    ms = [
-      {{{:"$1", :"$2", :"$3"}, :"$4"}, [], [{{:"$1", :"$2", :"$3", :"$4"}}]}
+    non_summary_ms = [
+      {{{:"$1", :"$2", :"$3"}, :"$4"}, [{:"/=", :"$2", :summary}],
+       [{{:"$1", :"$2", :"$3", :"$4"}}]}
     ]
 
-    raw = :ets.select(table, ms)
+    summary_keys_ms = [
+      {{{:"$1", :summary, :"$3"}, :_}, [], [{{:"$1", :summary, :"$3"}}]}
+    ]
 
-    for {name, :summary, meta, _value} <- raw do
-      :ets.delete(table, {name, :summary, meta})
-    end
+    non_summary = :ets.select(table, non_summary_ms)
 
-    Enum.map(raw, fn {name, type, meta, value} ->
+    summary =
+      table
+      |> :ets.select(summary_keys_ms)
+      |> Enum.flat_map(fn {name, :summary, meta} = key ->
+        case :ets.take(table, key) do
+          [{^key, value}] -> [{name, :summary, meta, value}]
+          [] -> []
+        end
+      end)
+
+    Enum.map(non_summary ++ summary, fn {name, type, meta, value} ->
       {normalized_name_to_string(name), type, value, meta}
     end)
   end
