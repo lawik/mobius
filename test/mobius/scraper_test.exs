@@ -1,0 +1,45 @@
+defmodule Mobius.ScraperTest do
+  use ExUnit.Case, async: false
+
+  alias Mobius.Scraper
+
+  @tag :tmp_dir
+  test "scrape uses the injected clock_fn for the timestamp", %{tmp_dir: tmp_dir} do
+    # Drive time deterministically: each call advances the fake clock by
+    # 60 seconds, so successive scrapes land on minute boundaries.
+    {:ok, agent} = Agent.start_link(fn -> 1_700_000_000 end)
+
+    clock_fn = fn ->
+      Agent.get_and_update(agent, fn t -> {t, t + 60} end)
+    end
+
+    metric = Telemetry.Metrics.counter("scraper_test.evt.count")
+    instance = :"scraper_test_#{System.unique_integer([:positive])}"
+
+    args = [
+      metrics: [metric],
+      mobius_instance: instance,
+      persistence_dir: tmp_dir,
+      clock_fn: clock_fn
+    ]
+
+    {:ok, _pid} = start_supervised({Mobius, args})
+
+    :telemetry.execute([:scraper_test, :evt], %{count: 1}, %{})
+
+    # Drive two scrapes manually so we don't depend on wall time.
+    scraper_pid = Process.whereis(Module.concat(Scraper, instance))
+    send(scraper_pid, :scrape)
+    :sys.get_state(scraper_pid)
+    send(scraper_pid, :scrape)
+    :sys.get_state(scraper_pid)
+
+    metrics = Scraper.all(instance)
+    timestamps = Enum.map(metrics, & &1.timestamp)
+
+    # The clock returned 1_700_000_000 and 1_700_000_060, exactly what
+    # we asked it to. If the scraper still hit System.system_time, the
+    # timestamps would be ~1_750_000_000+ (real wall clock).
+    assert timestamps == [1_700_000_000, 1_700_000_060]
+  end
+end

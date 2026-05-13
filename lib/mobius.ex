@@ -52,6 +52,9 @@ defmodule Mobius do
   * `:events` - a list of events for mobius to store in the event log
   * `:event_log_size` - number of events to store (defaults to 500)
   * `:clock` - module that implements the `Mobius.Clock` behaviour
+  * `:clock_fn` - zero-arity function that returns the current unix time
+     in seconds, used by the scraper. Defaults to `System.system_time(:second)`.
+     Intended for tests that need to drive time deterministically.
   * `:session` - a unique id to distinguish between different ties Mobius has ran
 
   Mobius sessions allow you collect events to analyze across the different times
@@ -71,6 +74,7 @@ defmodule Mobius do
           | {:events, [event_def()]}
           | {:event_log_size, integer()}
           | {:clock, module()}
+          | {:clock_fn, (-> integer())}
           | {:session, session()}
 
   @typedoc """

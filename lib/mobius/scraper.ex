@@ -59,7 +59,10 @@ defmodule Mobius.Scraper do
     args
     |> Keyword.take([:mobius_instance, :persistence_dir])
     |> Enum.into(%{})
+    |> Map.put(:clock, args[:clock_fn] || (&default_clock/0))
   end
+
+  defp default_clock, do: System.system_time(:second)
 
   defp make_database(state, args) do
     rrd =
@@ -133,7 +136,7 @@ defmodule Mobius.Scraper do
         {:noreply, state}
 
       scrape ->
-        ts = System.system_time(:second)
+        ts = state.clock.()
         scrape = scrape_to_metrics_list(ts, scrape)
         database = RRD.insert(state.database, ts, scrape)
 
