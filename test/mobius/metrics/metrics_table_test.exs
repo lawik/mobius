@@ -99,4 +99,42 @@ defmodule Mobius.Metrics.MetricsTableTest do
     assert [{^metric_name, :summary, %{accumulated: 220, max: 120, min: 100, reports: 2}, %{}}] =
              MetricsTable.get_entries_by_metric_name(table, metric_name)
   end
+
+  describe "snapshot_for_scrape/1" do
+    test "returns the snapshot and clears summary rows so the next scrape starts fresh",
+         %{table: table} do
+      :ok = MetricsTable.put(table, [:reset_summary], :summary, 100)
+      :ok = MetricsTable.put(table, [:reset_summary], :summary, 200)
+
+      snapshot = MetricsTable.snapshot_for_scrape(table)
+
+      assert [{"reset_summary", :summary, %{accumulated: 300, reports: 2}, %{}}] = snapshot
+
+      # Row gone from the table.
+      assert MetricsTable.get_entries_by_metric_name(table, "reset_summary") == []
+
+      # Next event accumulates from scratch.
+      :ok = MetricsTable.put(table, [:reset_summary], :summary, 50)
+
+      assert [{"reset_summary", :summary, %{accumulated: 50, max: 50, min: 50, reports: 1}, %{}}] =
+               MetricsTable.get_entries_by_metric_name(table, "reset_summary")
+    end
+
+    test "does NOT clear counters, sums, or last_value rows", %{table: table} do
+      :ok = MetricsTable.inc_counter(table, [:keep, :counter])
+      :ok = MetricsTable.update_sum(table, [:keep, :sum], 42)
+      :ok = MetricsTable.put(table, [:keep, :last], :last_value, 7)
+
+      _ = MetricsTable.snapshot_for_scrape(table)
+
+      assert [{"keep.counter", :counter, 1, %{}}] =
+               MetricsTable.get_entries_by_metric_name(table, "keep.counter")
+
+      assert [{"keep.sum", :sum, 42, %{}}] =
+               MetricsTable.get_entries_by_metric_name(table, "keep.sum")
+
+      assert [{"keep.last", :last_value, 7, %{}}] =
+               MetricsTable.get_entries_by_metric_name(table, "keep.last")
+    end
+  end
 end

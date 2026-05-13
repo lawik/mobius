@@ -131,7 +131,7 @@ defmodule Mobius.Scraper do
 
   @impl GenServer
   def handle_info(:scrape, state) do
-    case MetricsTable.get_entries(state.mobius_instance) do
+    case MetricsTable.snapshot_for_scrape(state.mobius_instance) do
       [] ->
         {:noreply, state}
 

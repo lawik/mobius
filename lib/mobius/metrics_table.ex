@@ -172,6 +172,35 @@ defmodule Mobius.MetricsTable do
   end
 
   @doc """
+  Snapshot the table for the scraper.
+
+  Returns all entries in the same shape as `get_entries/1` and
+  atomically clears `:summary` rows so the next scrape starts a fresh
+  window. Counter / sum / last_value rows are left untouched — those
+  types are intentionally cumulative.
+
+  Without this, the consolidator would store the same lifetime summary
+  120 times in the seconds bucket, and per-minute summary CDPs would
+  represent everything since process start rather than just the minute.
+  """
+  @spec snapshot_for_scrape(Mobius.instance()) :: [metric_entry()]
+  def snapshot_for_scrape(table) do
+    ms = [
+      {{{:"$1", :"$2", :"$3"}, :"$4"}, [], [{{:"$1", :"$2", :"$3", :"$4"}}]}
+    ]
+
+    raw = :ets.select(table, ms)
+
+    for {name, :summary, meta, _value} <- raw do
+      :ets.delete(table, {name, :summary, meta})
+    end
+
+    Enum.map(raw, fn {name, type, meta, value} ->
+      {normalized_name_to_string(name), type, value, meta}
+    end)
+  end
+
+  @doc """
   Get metrics by event name
   """
   @spec get_entries_by_metric_name(Mobius.instance(), Mobius.metric_name()) :: [metric_entry()]
