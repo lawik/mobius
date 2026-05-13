@@ -2,11 +2,12 @@ defmodule Mobius.Consolidator do
   @moduledoc """
   Tiered metric storage with proper consolidation across resolutions.
 
-  Replaces the decimating behavior of `Mobius.RRD` for metric data.
   Per-metric, per-resolution accumulators aggregate primary data points
-  (PDPs) into consolidation data points (CDPs) on each boundary crossing,
-  so a "minute sample" represents the full minute of activity rather
-  than a single value taken at the :00 second.
+  (PDPs) into consolidation data points (CDPs) on each boundary
+  crossing, so a "minute sample" represents the full minute of activity
+  rather than a single value taken at the :00 second. This replaces
+  the simpler decimating buffer used before this version, which only
+  ever stored the value at each interval boundary.
 
   Consolidation per metric type:
 
