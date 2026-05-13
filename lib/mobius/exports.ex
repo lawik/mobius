@@ -15,6 +15,7 @@ defmodule Mobius.Exports do
   """
 
   alias Mobius.Asciichart
+  alias Mobius.Consolidator
   alias Mobius.Exports.{CSV, Metrics, MobiusBinaryFormat, UnsupportedMetricError}
 
   @typedoc """
@@ -146,14 +147,28 @@ defmodule Mobius.Exports do
   end
 
   @doc """
-  Pairwise delta of a cumulative metric.
+  Per-interval delta of a cumulative metric.
 
-  `:counter` and `:sum` metrics are stored as running totals, so two
-  consecutive stored samples differ by "events in the interval between
-  them". `delta/4` returns that difference for each adjacent pair.
+  For `:counter` / `:sum` metrics, the consolidator stores two different
+  value semantics depending on resolution:
 
-  Returns a list of `{timestamp, delta}` tuples. The first stored sample
-  has no predecessor, so the result has one fewer entry than `metrics/4`.
+    * Raw seconds-bucket PDPs hold the running total at scrape time.
+    * Minute / hour / day CDPs already hold the delta over their period
+      (tagged with `:period_seconds`).
+
+  `delta/4` returns a `{timestamp, delta}` list with consistent
+  "events during the period leading up to / starting at `timestamp`"
+  meaning regardless of which bucket each sample came from:
+
+    * Adjacent raw PDPs: emit `{curr_ts, curr.value - prev.value}` —
+      events in the 1s interval ending at `curr_ts`.
+    * A CDP: emit `{cdp_ts, cdp.value}` — events in the period
+      `[cdp_ts, cdp_ts + period_seconds)`. The CDP's stored value is
+      already the delta; no subtraction.
+
+  The seconds→minute boundary pair (a CDP followed by the oldest raw
+  PDP) is not emitted as a paired delta — the PDP at the boundary is
+  a single cumulative reading with no comparable predecessor.
 
   ```elixir
   Mobius.Exports.delta("http.request.count", :counter, %{}, last: {5, :minute})
@@ -167,19 +182,20 @@ defmodule Mobius.Exports do
   def delta(metric_name, type, tags, opts \\ []) when type in [:counter, :sum] do
     metric_name
     |> metrics(type, tags, opts)
-    |> Enum.chunk_every(2, 1, :discard)
-    |> Enum.map(fn [prev, curr] -> {curr.timestamp, curr.value - prev.value} end)
+    |> deltas()
+    |> Enum.map(fn {ts, _period, delta} -> {ts, delta} end)
   end
 
   @doc """
   Per-second rate of a cumulative metric.
 
-  Same shape as `delta/4` but divides each delta by the elapsed time
-  since the previous sample. Returns `{timestamp, events_per_second}`
-  tuples as floats.
+  Same shape as `delta/4` but divides each delta by the period it
+  describes. Returns `{timestamp, events_per_second}` tuples as floats.
 
-  Useful for plotting "requests per second" or "bytes per second" from a
-  counter/sum without doing the diff by hand.
+  CDPs are divided by their `:period_seconds` (one minute, one hour,
+  etc); adjacent raw PDPs are divided by the elapsed wall time between
+  them. Useful for plotting "requests per second" or "bytes per second"
+  from a counter/sum without doing the diff by hand.
 
   ```elixir
   Mobius.Exports.rate("http.request.count", :counter, %{}, last: {5, :minute})
@@ -191,15 +207,40 @@ defmodule Mobius.Exports do
   def rate(metric_name, type, tags, opts \\ []) when type in [:counter, :sum] do
     metric_name
     |> metrics(type, tags, opts)
-    |> Enum.chunk_every(2, 1, :discard)
-    |> Enum.map(fn [prev, curr] ->
-      seconds = curr.timestamp - prev.timestamp
-      if seconds > 0 do
-        {curr.timestamp, (curr.value - prev.value) / seconds}
-      else
-        {curr.timestamp, 0.0}
-      end
+    |> deltas()
+    |> Enum.map(fn
+      {ts, period, delta} when period > 0 -> {ts, delta / period}
+      {ts, _period, _delta} -> {ts, 0.0}
     end)
+  end
+
+  # Walk the sample list once, emitting `{ts, period_seconds, delta}`
+  # for each comparable point:
+  #
+  #   * If the sample is a CDP (period > 1), the stored value IS the
+  #     delta — emit it directly. Reset the "previous PDP" tracker so
+  #     we don't try to bridge the CDP/PDP boundary.
+  #
+  #   * If the sample is a raw PDP and the immediate predecessor was
+  #     also a raw PDP, subtract to get the delta. The pair's effective
+  #     period is the elapsed wall time between them.
+  defp deltas(samples) do
+    {acc, _prev} =
+      Enum.reduce(samples, {[], nil}, fn curr, {acc, prev} ->
+        case Consolidator.period_seconds(curr) do
+          1 when prev != nil ->
+            elapsed = curr.timestamp - prev.timestamp
+            {[{curr.timestamp, elapsed, curr.value - prev.value} | acc], curr}
+
+          1 ->
+            {acc, curr}
+
+          period ->
+            {[{curr.timestamp, period, curr.value} | acc], nil}
+        end
+      end)
+
+    Enum.reverse(acc)
   end
 
   @typedoc """
@@ -237,11 +278,27 @@ defmodule Mobius.Exports do
   Mobius.Exports.aggregate("vm.memory.total", :last_value, %{},
     bucket: :minute, function: :max, last: {1, :hour})
   ```
+
+  Not valid for `:counter` / `:sum` — those metrics store cumulative
+  values at second resolution but per-period deltas at minute / hour /
+  day resolution, so aggregating across both kinds in one bucket would
+  mix value semantics. Use `delta/4` or `rate/4` instead, then bucket
+  the result yourself if needed.
   """
-  @spec aggregate(Mobius.metric_name(), Mobius.metric_type(), map(),
-          [{:bucket, Mobius.time_unit() | {pos_integer(), Mobius.time_unit()}}
-           | {:function, aggregate_function()}
-           | export_opt()]) :: [{integer(), number()}]
+  @spec aggregate(Mobius.metric_name(), Mobius.metric_type(), map(), [
+          {:bucket, Mobius.time_unit() | {pos_integer(), Mobius.time_unit()}}
+          | {:function, aggregate_function()}
+          | export_opt()
+        ]) :: [{integer(), number()}]
+  def aggregate(metric_name, type, tags, _opts)
+      when type in [:counter, :sum] do
+    raise ArgumentError,
+          "Mobius.Exports.aggregate/4 cannot operate on #{inspect(type)} metrics " <>
+            "(metric #{inspect(metric_name)}, tags #{inspect(tags)}): stored values are " <>
+            "cumulative at second resolution and per-period deltas at minute/hour/day. " <>
+            "Use Mobius.Exports.delta/4 or Mobius.Exports.rate/4 instead."
+  end
+
   def aggregate(metric_name, type, tags, opts) do
     bucket_seconds = bucket_seconds!(Keyword.fetch!(opts, :bucket))
     function = Keyword.get(opts, :function, :avg)

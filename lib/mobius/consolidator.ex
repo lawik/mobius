@@ -150,6 +150,26 @@ defmodule Mobius.Consolidator do
     end
   end
 
+  # Stamp CDPs with the period they describe. Raw PDPs (seconds bucket)
+  # are left unmarked — `period_seconds/1` treats absence as 1.
+  #
+  # Consumers like `Mobius.Exports.delta/4` rely on this to tell whether
+  # a stored `value` is a cumulative reading (raw PDP for :counter /
+  # :sum) or already a per-period delta (CDP for the same types).
+  defp tag_cdp(metric, period_seconds) do
+    Map.put(metric, :period_seconds, period_seconds)
+  end
+
+  @doc """
+  Resolution period for a stored metric, in seconds.
+
+  Raw PDPs from the seconds bucket are 1Hz scrapes, so they report 1.
+  CDPs carry their period explicitly via `:period_seconds`.
+  """
+  @spec period_seconds(Mobius.metric()) :: pos_integer()
+  def period_seconds(%{period_seconds: p}) when is_integer(p) and p > 0, do: p
+  def period_seconds(_), do: 1
+
   defp metric_key(metric), do: {metric.name, metric.type, metric.tags}
 
   # Period alignment: each period bucket starts at `div(ts, period) * period`
@@ -157,17 +177,19 @@ defmodule Mobius.Consolidator do
   # ts=1_700_006_437 spans [1_700_006_400, 1_700_006_460).
   defp open_accumulator(ts, period_seconds, metric) do
     start_ts = div(ts, period_seconds) * period_seconds
+    v = numeric_value(metric)
+    {first, count, init_num} = if is_number(v), do: {v, 1, v}, else: {nil, 0, 0}
 
     %{
       start_ts: start_ts,
       end_ts: start_ts + period_seconds,
       metric: metric,
-      first_value: numeric_value(metric),
-      last_value: numeric_value(metric),
-      min: numeric_value(metric) || 0,
-      max: numeric_value(metric) || 0,
-      sum: numeric_value(metric) || 0,
-      count: 1,
+      first_value: first,
+      last_value: first,
+      min: init_num,
+      max: init_num,
+      sum: init_num,
+      count: count,
       summary_data: summary_data(metric)
     }
   end
@@ -178,18 +200,29 @@ defmodule Mobius.Consolidator do
   defp summary_data(%{type: :summary, value: data}) when is_map(data), do: data
   defp summary_data(_), do: nil
 
+  # Non-numeric samples are skipped from min/max/sum/count so the
+  # eventual average isn't biased by them. They still update
+  # `last_value` and the summary merge path; only the numeric
+  # statistics ignore them.
   defp update_accumulator(acc, metric) do
     v = numeric_value(metric)
 
-    %{
-      acc
-      | last_value: v,
-        min: if(is_number(v), do: min(acc.min, v), else: acc.min),
-        max: if(is_number(v), do: max(acc.max, v), else: acc.max),
-        sum: if(is_number(v), do: acc.sum + v, else: acc.sum),
-        count: acc.count + 1,
-        summary_data: merge_summary(acc.summary_data, summary_data(metric))
-    }
+    if is_number(v) do
+      first = acc.first_value || v
+
+      %{
+        acc
+        | first_value: first,
+          last_value: v,
+          min: if(acc.count == 0, do: v, else: min(acc.min, v)),
+          max: if(acc.count == 0, do: v, else: max(acc.max, v)),
+          sum: acc.sum + v,
+          count: acc.count + 1,
+          summary_data: merge_summary(acc.summary_data, summary_data(metric))
+      }
+    else
+      %{acc | summary_data: merge_summary(acc.summary_data, summary_data(metric))}
+    end
   end
 
   defp merge_summary(nil, b), do: b
@@ -205,25 +238,30 @@ defmodule Mobius.Consolidator do
     }
   end
 
-  defp close_accumulator(acc, _period_seconds) do
+  defp close_accumulator(acc, period_seconds) do
     base = acc.metric
 
     cdp_value =
       case base.type do
-        :counter -> acc.last_value - acc.first_value
-        :sum -> acc.last_value - acc.first_value
+        :counter -> safe_diff(acc.last_value, acc.first_value)
+        :sum -> safe_diff(acc.last_value, acc.first_value)
         :last_value -> consolidate_last_value(acc, base)
         :summary -> acc.summary_data
       end
 
     %{base | value: cdp_value, timestamp: acc.start_ts}
+    |> tag_cdp(period_seconds)
   end
+
+  defp safe_diff(a, b) when is_number(a) and is_number(b), do: a - b
+  defp safe_diff(_, _), do: 0
 
   defp consolidate_last_value(acc, metric) do
     case reporter_consolidate(metric) do
       :max -> acc.max
       :min -> acc.min
       :last -> acc.last_value
+      _ when acc.count == 0 -> acc.last_value
       _ -> acc.sum / acc.count
     end
   end

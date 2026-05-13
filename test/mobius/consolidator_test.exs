@@ -289,6 +289,32 @@ defmodule Mobius.ConsolidatorTest do
     end
   end
 
+  describe "CDPs carry their resolution" do
+    test "closed CDPs are tagged with :period_seconds" do
+      base = 1_700_006_400
+
+      state =
+        Enum.reduce(0..120, Consolidator.new(@args), fn offset, st ->
+          Consolidator.insert(st, base + offset, [
+            metric("res.evt.count", :counter, offset + 1)
+          ])
+        end)
+
+      minutes = CircularBuffer.to_list(state.minute)
+      assert length(minutes) >= 1
+
+      for {_ts, [cdp]} <- minutes do
+        assert cdp.period_seconds == 60
+        assert Consolidator.period_seconds(cdp) == 60
+      end
+    end
+
+    test "raw PDPs in the seconds bucket report period_seconds/1 == 1" do
+      pdp = metric("res.evt.count", :last_value, 7)
+      assert Consolidator.period_seconds(pdp) == 1
+    end
+  end
+
   describe "legacy on-disk formats" do
     test "loads a v2 (legacy Mobius.RRD) file by replaying samples through insert/3" do
       # Hand-build a v2-format binary: <<2, encoded_list>> where the

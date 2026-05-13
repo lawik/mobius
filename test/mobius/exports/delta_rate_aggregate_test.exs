@@ -135,7 +135,7 @@ defmodule Mobius.Exports.DeltaRateAggregateTest do
       )
 
     # The trace started at 1_700_006_400. Minute buckets land at
-    # 1_700_006_400 (offsets 0..59) and 1_700_000_060 (offsets 60..89).
+    # 1_700_006_400 (offsets 0..59) and 1_700_006_460 (offsets 60..89).
     assert max_per_minute == [
              {1_700_006_400, 1000},
              {1_700_006_460, 500}
@@ -163,5 +163,80 @@ defmodule Mobius.Exports.DeltaRateAggregateTest do
 
     expected_avg = Enum.sum(0..59) / 60
     assert [{1_700_006_400, ^expected_avg}] = avg
+  end
+
+  @tag :tmp_dir
+  test "delta/4 reads counter CDPs as already-deltas across the seconds boundary",
+       %{tmp_dir: tmp_dir} do
+    # Drive 4 full minutes of one event per second. The first ~3 minutes
+    # of raw PDPs rotate out of the seconds bucket (default size 180),
+    # so the oldest part of the series is served as minute CDPs while
+    # the most recent part is served as raw cumulative PDPs.
+    #
+    # If delta/4 naively subtracted adjacent values across the boundary,
+    # we'd get either delta-of-deltas (negative) or a giant spike where
+    # the CDP value (~59) meets the next cumulative reading. The fix
+    # returns CDP values as-is and only subtracts between adjacent PDPs.
+    %{instance: instance, advance: advance, scrape: scrape} =
+      start_pipeline([{:counter, "boundary.evt.count"}], tmp_dir)
+
+    Enum.each(0..(4 * 60), fn _ ->
+      :telemetry.execute([:boundary, :evt], %{count: 1}, %{})
+      scrape.()
+      advance.(1)
+    end)
+
+    deltas =
+      Exports.delta("boundary.evt.count", :counter, %{}, mobius_instance: instance, from: 0)
+
+    values = Enum.map(deltas, fn {_ts, v} -> v end)
+
+    # A closed minute CDP reports `last - first` = 59 (cumulative
+    # 60 minus cumulative 1) — the very first event of each period
+    # is the baseline. Adjacent PDPs report 1 each.
+    assert Enum.any?(values, &(&1 == 59)),
+           "expected at least one minute CDP reporting ~59 events, got #{inspect(values)}"
+
+    refute Enum.any?(values, &(&1 < 0)),
+           "delta values should never be negative, got #{inspect(values)}"
+
+    refute Enum.any?(values, &(&1 > 60)),
+           "no delta should exceed a full minute's worth of events, got #{inspect(values)}"
+  end
+
+  @tag :tmp_dir
+  test "rate/4 divides CDPs by their period_seconds, not the wall delta",
+       %{tmp_dir: tmp_dir} do
+    %{instance: instance, advance: advance, scrape: scrape} =
+      start_pipeline([{:counter, "boundary.rate.count"}], tmp_dir)
+
+    Enum.each(0..(4 * 60), fn _ ->
+      :telemetry.execute([:boundary, :rate], %{count: 1}, %{})
+      scrape.()
+      advance.(1)
+    end)
+
+    rates = Exports.rate("boundary.rate.count", :counter, %{}, mobius_instance: instance, from: 0)
+
+    # One event per second sustained → every emitted rate should be
+    # close to 1.0/s. PDP pairs are exactly 1.0; CDPs are 59/60 ≈ 0.983
+    # (the first sample of each period establishes the baseline and
+    # isn't itself counted). The point is that boundary crossings
+    # don't produce wild values.
+    for {_ts, r} <- rates do
+      assert_in_delta r, 1.0, 0.02
+    end
+  end
+
+  test "aggregate/4 refuses :counter with a pointer at delta/rate" do
+    assert_raise ArgumentError, ~r/cannot operate on :counter/, fn ->
+      Exports.aggregate("any.counter", :counter, %{}, bucket: :minute)
+    end
+  end
+
+  test "aggregate/4 refuses :sum with a pointer at delta/rate" do
+    assert_raise ArgumentError, ~r/cannot operate on :sum/, fn ->
+      Exports.aggregate("any.sum", :sum, %{}, bucket: :minute)
+    end
   end
 end
