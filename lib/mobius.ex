@@ -197,8 +197,9 @@ defmodule Mobius do
   end
 
   def info(instance) do
-    instance
-    |> MetricsTable.get_entries()
+    entries = info_entries(instance)
+
+    entries
     |> Enum.group_by(fn {metric_name, _type, _value, meta} -> {metric_name, meta} end)
     |> Enum.each(fn {{metric_name, meta}, metrics} ->
       reports =
@@ -215,6 +216,30 @@ defmodule Mobius do
       ]
       |> IO.puts()
     end)
+  end
+
+  # Counter / sum / last_value come from MetricsTable (cumulative since
+  # process start, which is what info/0 has always shown).
+  # Summary reads from the latest closed-window CDP in the consolidator
+  # — MetricsTable's summary row is now per-tick (sub-second) since the
+  # reset-on-scrape change, so it carries no useful interactive info.
+  defp info_entries(instance) do
+    non_summary =
+      instance
+      |> MetricsTable.get_entries()
+      |> Enum.reject(fn {_, type, _, _} -> type == :summary end)
+
+    summaries =
+      instance
+      |> Scraper.all()
+      |> Enum.filter(fn m -> m.type == :summary end)
+      |> Enum.group_by(fn m -> {m.name, m.tags} end)
+      |> Enum.map(fn {{name, tags}, samples} ->
+        latest = Enum.max_by(samples, & &1.timestamp)
+        {name, :summary, latest.value, tags}
+      end)
+
+    non_summary ++ summaries
   end
 
   defp format_value(:summary, summary_data) do

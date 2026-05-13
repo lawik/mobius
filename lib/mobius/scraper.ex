@@ -42,6 +42,16 @@ defmodule Mobius.Scraper do
   @spec save(Mobius.instance()) :: :ok | {:error, reason :: term()}
   def save(instance), do: GenServer.call(name(instance), :save)
 
+  @doc """
+  Return the most recent stored sample for the given metric, or nil if
+  none has been recorded yet.
+  """
+  @spec latest_for(Mobius.instance(), Mobius.metric_name(), Mobius.metric_type(), map()) ::
+          Mobius.metric() | nil
+  def latest_for(instance, metric_name, type, tags) do
+    GenServer.call(name(instance), {:latest_for, metric_name, type, tags})
+  end
+
   @impl GenServer
   def init(args) do
     _ = :timer.send_interval(@interval, self(), :scrape)
@@ -115,6 +125,10 @@ defmodule Mobius.Scraper do
 
   def handle_call(:save, _from, state) do
     {:reply, save_to_persistence(state), state}
+  end
+
+  def handle_call({:latest_for, metric_name, type, tags}, _from, state) do
+    {:reply, Consolidator.latest_for(state.database, metric_name, type, tags), state}
   end
 
   defp query_database(from, state, opts) do

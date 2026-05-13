@@ -301,6 +301,30 @@ defmodule Mobius.Consolidator do
   end
 
   @doc """
+  Return the most recent stored sample for `(name, type, tags)`, or
+  `nil` if none has been recorded yet.
+
+  Used by `Mobius.info/0` for `:summary` metrics: the MetricsTable's
+  summary row holds only sub-second data (after the per-tick reset),
+  so `info/0` queries the consolidator for the most recent closed-
+  window CDP — typically the previous minute. Falls through to hour
+  or day CDPs if nothing finer exists yet, and finally to the most
+  recent seconds-bucket PDP.
+  """
+  @spec latest_for(t(), Mobius.metric_name(), Mobius.metric_type(), map()) ::
+          Mobius.metric() | nil
+  def latest_for(state, name, type, tags) do
+    state
+    |> all()
+    |> Enum.reverse()
+    |> Enum.find_value(nil, fn {_ts, metrics} ->
+      Enum.find(metrics, fn m ->
+        m.name == name and m.type == type and m.tags == tags
+      end)
+    end)
+  end
+
+  @doc """
   Serialize state to a binary iolist.
 
   Each resolution's bucket is encoded separately so that loading does not

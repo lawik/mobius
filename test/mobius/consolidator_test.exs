@@ -229,6 +229,42 @@ defmodule Mobius.ConsolidatorTest do
     end
   end
 
+  describe "latest_for/4" do
+    test "returns the most recent matching sample across all resolutions" do
+      base = 1_700_006_400
+
+      state =
+        Enum.reduce(0..119, Consolidator.new(@args), fn offset, st ->
+          Consolidator.insert(st, base + offset, [metric("cpu.pct", :last_value, offset)])
+        end)
+
+      assert %{name: "cpu.pct", type: :last_value, value: 119, timestamp: 1_700_006_519} =
+               Consolidator.latest_for(state, "cpu.pct", :last_value, %{})
+    end
+
+    test "returns nil when no matching sample exists" do
+      state = Consolidator.new(@args)
+      assert Consolidator.latest_for(state, "missing.metric", :last_value, %{}) == nil
+    end
+
+    test "after the first minute closes, latest_for prefers the closed CDP if seconds rotated out" do
+      base = 1_700_006_400
+
+      # Run long enough that the seconds bucket no longer covers the
+      # first minute, so the CDP at base is the freshest source for
+      # 'value at minute base'.
+      state =
+        Enum.reduce(0..240, Consolidator.new(@args), fn offset, st ->
+          Consolidator.insert(st, base + offset, [metric("cpu.pct", :last_value, offset)])
+        end)
+
+      # The most recent overall sample is the most recent seconds PDP.
+      latest = Consolidator.latest_for(state, "cpu.pct", :last_value, %{})
+      assert latest.timestamp == base + 240
+      assert latest.value == 240
+    end
+  end
+
   describe "serialization round-trips" do
     test "save then load reconstructs the stored data" do
       base = 1_700_006_400
