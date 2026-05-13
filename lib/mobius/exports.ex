@@ -145,6 +145,134 @@ defmodule Mobius.Exports do
     Metrics.export(metric_name, type, tags, opts)
   end
 
+  @doc """
+  Pairwise delta of a cumulative metric.
+
+  `:counter` and `:sum` metrics are stored as running totals, so two
+  consecutive stored samples differ by "events in the interval between
+  them". `delta/4` returns that difference for each adjacent pair.
+
+  Returns a list of `{timestamp, delta}` tuples. The first stored sample
+  has no predecessor, so the result has one fewer entry than `metrics/4`.
+
+  ```elixir
+  Mobius.Exports.delta("http.request.count", :counter, %{}, last: {5, :minute})
+  # => [{1700000060, 12}, {1700000120, 19}, ...]
+  ```
+
+  Only `:counter` and `:sum` are valid; other types raise.
+  """
+  @spec delta(Mobius.metric_name(), :counter | :sum, map(), [export_opt()]) ::
+          [{integer(), number()}]
+  def delta(metric_name, type, tags, opts \\ []) when type in [:counter, :sum] do
+    metric_name
+    |> metrics(type, tags, opts)
+    |> Enum.chunk_every(2, 1, :discard)
+    |> Enum.map(fn [prev, curr] -> {curr.timestamp, curr.value - prev.value} end)
+  end
+
+  @doc """
+  Per-second rate of a cumulative metric.
+
+  Same shape as `delta/4` but divides each delta by the elapsed time
+  since the previous sample. Returns `{timestamp, events_per_second}`
+  tuples as floats.
+
+  Useful for plotting "requests per second" or "bytes per second" from a
+  counter/sum without doing the diff by hand.
+
+  ```elixir
+  Mobius.Exports.rate("http.request.count", :counter, %{}, last: {5, :minute})
+  # => [{1700000060, 0.2}, {1700000120, 0.31666...}, ...]
+  ```
+  """
+  @spec rate(Mobius.metric_name(), :counter | :sum, map(), [export_opt()]) ::
+          [{integer(), float()}]
+  def rate(metric_name, type, tags, opts \\ []) when type in [:counter, :sum] do
+    metric_name
+    |> metrics(type, tags, opts)
+    |> Enum.chunk_every(2, 1, :discard)
+    |> Enum.map(fn [prev, curr] ->
+      seconds = curr.timestamp - prev.timestamp
+      if seconds > 0 do
+        {curr.timestamp, (curr.value - prev.value) / seconds}
+      else
+        {curr.timestamp, 0.0}
+      end
+    end)
+  end
+
+  @typedoc """
+  How to combine multiple metric samples that fall into the same bucket.
+
+  Used by `aggregate/4`:
+
+  * `:avg` - arithmetic mean of `:value` over the bucket
+  * `:min` - minimum `:value`
+  * `:max` - maximum `:value`
+  * `:last` - the most recent `:value` in the bucket
+  * `:sum` - the sum of `:value` over the bucket
+  """
+  @type aggregate_function() :: :avg | :min | :max | :last | :sum
+
+  @doc """
+  Re-bucket stored samples and apply an aggregation function per bucket.
+
+  Mobius stores samples at the resolution the scraper observed. Use
+  `aggregate/4` to combine samples into coarser buckets at read time —
+  for example, "max of vm.memory.total per minute over the last hour."
+
+  Options:
+
+  * `:bucket` - the bucket size as `Mobius.time_unit()` or `{n, unit}`
+    (e.g. `:minute`, `{5, :minute}`). Required.
+  * `:function` - one of `t:aggregate_function/0`. Defaults to `:avg`.
+  * All `t:export_opt/0` options (`:from`, `:to`, `:last`, `:mobius_instance`)
+    are also accepted.
+
+  Returns `{bucket_start_ts, aggregated_value}` tuples sorted by time.
+  Buckets with no samples are omitted.
+
+  ```elixir
+  Mobius.Exports.aggregate("vm.memory.total", :last_value, %{},
+    bucket: :minute, function: :max, last: {1, :hour})
+  ```
+  """
+  @spec aggregate(Mobius.metric_name(), Mobius.metric_type(), map(),
+          [{:bucket, Mobius.time_unit() | {pos_integer(), Mobius.time_unit()}}
+           | {:function, aggregate_function()}
+           | export_opt()]) :: [{integer(), number()}]
+  def aggregate(metric_name, type, tags, opts) do
+    bucket_seconds = bucket_seconds!(Keyword.fetch!(opts, :bucket))
+    function = Keyword.get(opts, :function, :avg)
+
+    metric_name
+    |> metrics(type, tags, opts)
+    |> Enum.group_by(fn m -> div(m.timestamp, bucket_seconds) * bucket_seconds end)
+    |> Enum.map(fn {bucket_start, samples} ->
+      values = Enum.map(samples, & &1.value)
+      {bucket_start, apply_aggregate(function, values, samples)}
+    end)
+    |> Enum.sort_by(fn {ts, _} -> ts end)
+  end
+
+  defp bucket_seconds!(:second), do: 1
+  defp bucket_seconds!(:minute), do: 60
+  defp bucket_seconds!(:hour), do: 3600
+  defp bucket_seconds!(:day), do: 86400
+  defp bucket_seconds!({n, unit}) when is_integer(n) and n > 0, do: n * bucket_seconds!(unit)
+
+  defp apply_aggregate(:avg, values, _), do: Enum.sum(values) / length(values)
+  defp apply_aggregate(:sum, values, _), do: Enum.sum(values)
+  defp apply_aggregate(:min, values, _), do: Enum.min(values)
+  defp apply_aggregate(:max, values, _), do: Enum.max(values)
+
+  defp apply_aggregate(:last, _values, samples) do
+    samples
+    |> Enum.max_by(& &1.timestamp)
+    |> Map.get(:value)
+  end
+
   defp get_metrics(metric_name, type, tags, opts) do
     filter_metrics_opts =
       opts
