@@ -7,6 +7,55 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > Major version zero (0.y.z) is for initial development. Anything MAY change at
 any time. The public API SHOULD NOT be considered stable.
 
+## [unreleased]
+
+### Changed
+
+* Replaced `Mobius.RRD` with `Mobius.Consolidator`, a tiered store that
+  aggregates primary data points into per-period CDPs on each boundary
+  crossing. A "minute sample" now reflects the full minute of activity
+  rather than a single value taken at the `:00` second.
+  * `:counter` / `:sum` CDPs hold the per-period delta (events in that
+    period) rather than the running total. The seconds bucket still
+    stores raw cumulative readings; use `Mobius.Exports.delta/4` or
+    `Mobius.Exports.rate/4` to get a consistent series.
+  * `:last_value` CDPs default to the arithmetic mean over the period.
+    Use `reporter_options: [consolidate: :max | :min | :last]` to
+    select a different consolidator per metric.
+  * `:summary` CDPs hold a merged `Mobius.Summary` for the period.
+  * Behavior of `Mobius.info/0` changes for `:summary` metrics: it now
+    reads the most recent closed-window CDP (typically the previous
+    minute) instead of stats accumulated since process start.
+* The persisted history file format is bumped to version 3. Version 2
+  and version 1 (legacy `Mobius.RRD`) files load by replay; counter /
+  sum history pre-dating the upgrade is effectively lost (each loaded
+  period replays as a single sample, so its delta is `0`). Live
+  scrapes resume normally after the migration.
+
+### Added
+
+* `Mobius.Exports.delta/4` — per-interval event count for cumulative
+  metrics.
+* `Mobius.Exports.rate/4` — per-second rate for cumulative metrics.
+* `Mobius.Exports.aggregate/4` — re-bucket and aggregate stored
+  samples; rejects `:counter` / `:sum` with a clear error pointing at
+  `delta/4` / `rate/4`.
+* `Mobius.Clock.now/0` — an optional callback that, when implemented,
+  is used by the scraper as the time source for sample timestamps.
+  Lets specialized clocks (e.g. a monotonic boot-time source, or a
+  deterministic test clock) own time end-to-end. `NervesTime` users
+  don't need to change anything; the callback is optional and the
+  scraper falls back to `System.system_time/1` when absent.
+* Telemetry events when the RRD drops a stale scrape.
+
+### Fixed
+
+* `Mobius.MetricsTable.snapshot_for_scrape/1` clears `:summary` rows
+  via `:ets.take/2` so concurrent telemetry events between the snapshot
+  and the reset are no longer silently dropped.
+* First-insert RRD bucket placement no longer depends on the current
+  wall clock.
+
 ## [v0.6.1] - 2024-04-02
 
 ### Changed

@@ -349,6 +349,11 @@ defmodule Mobius.Consolidator do
   window CDP — typically the previous minute. Falls through to hour
   or day CDPs if nothing finer exists yet, and finally to the most
   recent seconds-bucket PDP.
+
+  Note for `:counter` / `:sum`: the returned sample's `:value` carries
+  cumulative-since-start semantics when it came from the seconds bucket
+  but per-period delta semantics when it came from a CDP. Inspect
+  `period_seconds/1` on the returned metric to disambiguate.
   """
   @spec latest_for(t(), Mobius.metric_name(), Mobius.metric_type(), map()) ::
           Mobius.metric() | nil
@@ -407,6 +412,14 @@ defmodule Mobius.Consolidator do
       migrated to the v2 map shape, then loaded as above.
 
   The state passed in supplies the bucket capacities.
+
+  Caveat for `:counter` / `:sum` migrating from legacy formats: the old
+  store kept the cumulative value at each boundary, not a delta. Replay
+  through `insert/3` therefore opens and closes each loaded period with
+  a single sample, and the closed CDP value comes out as `last - first
+  == 0`. Only `:last_value` and `:summary` history migrate with
+  meaningful values; counter/sum history is effectively lost on
+  migration and the count resumes from the next live scrape.
   """
   @spec load(t(), binary()) :: {:ok, t()} | {:error, Mobius.DataLoadError.t()}
   def load(state, <<@serialization_version, data::binary>>) do
