@@ -4,7 +4,7 @@ defmodule Mobius.Scraper do
   use GenServer
   require Logger
 
-  alias Mobius.{MetricsTable, RRD}
+  alias Mobius.{Consolidator, MetricsTable}
 
   @interval 1_000
 
@@ -74,7 +74,7 @@ defmodule Mobius.Scraper do
 
   defp load_data(database, state) do
     with {:ok, contents} <- File.read(file(state)),
-         {:ok, rrd} <- RRD.load(database, contents) do
+         {:ok, rrd} <- Consolidator.load(database, contents) do
       rrd
     else
       {:error, :enoent} ->
@@ -103,7 +103,7 @@ defmodule Mobius.Scraper do
       nil ->
         metrics =
           state.database
-          |> RRD.all()
+          |> Consolidator.all()
           |> to_metrics_list()
 
         {:reply, metrics, state}
@@ -120,11 +120,11 @@ defmodule Mobius.Scraper do
   defp query_database(from, state, opts) do
     case opts[:to] do
       nil ->
-        RRD.query(state.database, from)
+        Consolidator.query(state.database, from)
         |> to_metrics_list()
 
       to ->
-        RRD.query(state.database, from, to)
+        Consolidator.query(state.database, from, to)
         |> to_metrics_list()
     end
   end
@@ -138,7 +138,7 @@ defmodule Mobius.Scraper do
       scrape ->
         ts = state.clock.()
         scrape = scrape_to_metrics_list(ts, scrape)
-        database = RRD.insert(state.database, ts, scrape)
+        database = Consolidator.insert(state.database, ts, scrape)
 
         {:noreply, %{state | database: database}}
     end
@@ -167,7 +167,7 @@ defmodule Mobius.Scraper do
 
   # Write our database to persistent storage
   defp save_to_persistence(state) do
-    contents = RRD.save(state.database)
+    contents = Consolidator.save(state.database)
 
     case File.write(file(state), contents) do
       :ok ->

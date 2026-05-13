@@ -47,8 +47,8 @@ defmodule Mobius do
   * `:persistence_dir` - the top level directory where mobius will persist
   * `:autosave_interval` - time in seconds between automatic writes of the
      persistence data (default disabled) metric information
-  * `:database` - the `Mobius.RRD.t()` to use. This will default to the default
-     values found in `Mobius.RRD`
+  * `:database` - the `Mobius.Consolidator.t()` to use. This will default
+     to the default values found in `Mobius.Consolidator`
   * `:events` - a list of events for mobius to store in the event log
   * `:event_log_size` - number of events to store (defaults to 500)
   * `:clock` - module that implements the `Mobius.Clock` behaviour
@@ -70,7 +70,7 @@ defmodule Mobius do
           {:mobius_instance, instance()}
           | {:metrics, [Metrics.t()]}
           | {:persistence_dir, binary()}
-          | {:database, Mobius.RRD.t()}
+          | {:database, Mobius.Consolidator.t()}
           | {:events, [event_def()]}
           | {:event_log_size, integer()}
           | {:clock, module()}
@@ -135,7 +135,7 @@ defmodule Mobius do
         args =
           args
           |> Keyword.put(:persistence_dir, mobius_persistence_path)
-          |> Keyword.put_new(:database, Mobius.RRD.new())
+          |> Keyword.put_new(:database, Mobius.Consolidator.new())
 
         MetricsTable.init(args)
 
