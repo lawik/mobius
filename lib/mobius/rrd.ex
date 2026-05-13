@@ -41,10 +41,10 @@ defmodule Mobius.RRD do
             hour: CircularBuffer.t(),
             minute: CircularBuffer.t(),
             second: CircularBuffer.t(),
-            day_next: integer(),
-            hour_next: integer(),
-            minute_next: integer(),
-            second_next: integer()
+            day_next: integer() | nil,
+            hour_next: integer() | nil,
+            minute_next: integer() | nil,
+            second_next: integer() | nil
           }
 
   @typedoc """
@@ -90,10 +90,10 @@ defmodule Mobius.RRD do
       hour: CircularBuffer.new(hours),
       minute: CircularBuffer.new(minutes),
       second: CircularBuffer.new(seconds),
-      day_next: 0,
-      hour_next: 0,
-      minute_next: 0,
-      second_next: 0
+      day_next: nil,
+      hour_next: nil,
+      minute_next: nil,
+      second_next: nil
     }
   end
 
@@ -101,6 +101,22 @@ defmodule Mobius.RRD do
   Insert an item for the specified time
   """
   @spec insert(t(), integer(), [Mobius.metric()]) :: t()
+  def insert(%{day_next: nil} = rrd, ts, item) do
+    # First insert ever: align all boundaries to this ts and let the
+    # value land in the seconds bucket below. Initializing boundaries
+    # to 0 in new/1 would force the first scrape into the day bucket
+    # regardless of wall clock — which causes the "day" archive to mix
+    # restart-time samples with real day-boundary samples across reboots.
+    rrd
+    |> Map.merge(%{
+      day_next: next(ts, 86400),
+      hour_next: next(ts, 3600),
+      minute_next: next(ts, 60),
+      second_next: ts
+    })
+    |> insert(ts, item)
+  end
+
   def insert(rrd, ts, item) do
     value = {ts, item}
 

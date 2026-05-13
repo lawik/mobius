@@ -128,7 +128,58 @@ defmodule Mobius.RRDTest do
     # Last 3 days (3 day samples, 48 hour samples, all 120 minute samples and all 120 second samples)
     assert Enum.count(RRD.query(buffer, now - 3 * 86400)) == 3 + 48 + 120 + 120
 
-    # Last 60 days
-    assert Enum.count(RRD.query(buffer, 0)) == 60 + 48 + 120 + 120
+    # Last 60 days: 59 day samples (one per calendar-day boundary; the
+    # very first insert at ts=0 lands in the seconds bucket, not the
+    # day bucket), 48 hour samples, 120 minute samples, 120 second samples.
+    assert Enum.count(RRD.query(buffer, 0)) == 59 + 48 + 120 + 120
+  end
+
+  describe "first-insert bootstrap" do
+    test "first insert into a fresh RRD lands in the seconds bucket regardless of wall clock" do
+      # Previously, all *_next boundaries defaulted to 0 in new/1, so the
+      # first scrape at any ts >= 0 satisfied ts >= day_next and ended up
+      # in the day bucket. That corrupted the 'day' archive with samples
+      # taken at process-start time across restarts.
+      ts = 1_700_000_123
+      rrd = RRD.new(@args) |> RRD.insert(ts, :first)
+
+      assert CircularBuffer.to_list(rrd.day) == []
+      assert CircularBuffer.to_list(rrd.hour) == []
+      assert CircularBuffer.to_list(rrd.minute) == []
+      assert CircularBuffer.to_list(rrd.second) == [{ts, :first}]
+    end
+
+    test "boundaries align to first ts so subsequent boundary inserts go to the right bucket" do
+      # First insert at ts in the middle of an hour. The next minute and
+      # hour boundaries are computed from that ts, not from 0.
+      ts = 86400 + 14 * 3600 + 32 * 60 + 45
+
+      next_minute_boundary = 86400 + 14 * 3600 + 33 * 60
+
+      rrd =
+        RRD.new(@args)
+        |> RRD.insert(ts, :first)
+        |> RRD.insert(next_minute_boundary, :at_minute)
+        |> RRD.insert(next_minute_boundary + 14, :between)
+
+      assert CircularBuffer.to_list(rrd.minute) == [{next_minute_boundary, :at_minute}]
+
+      assert Enum.sort(CircularBuffer.to_list(rrd.second)) == [
+               {ts, :first},
+               {next_minute_boundary + 14, :between}
+             ]
+    end
+
+    test "constant 1Hz feed crosses a day boundary cleanly with one day-bucket entry per real boundary" do
+      end_ts = 86400 + 100
+
+      rrd =
+        Enum.reduce(0..end_ts, RRD.new(@args), fn ts, acc ->
+          RRD.insert(acc, ts, ts)
+        end)
+
+      day_entries = CircularBuffer.to_list(rrd.day)
+      assert day_entries == [{86400, 86400}]
+    end
   end
 end
