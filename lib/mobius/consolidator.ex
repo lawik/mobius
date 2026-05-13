@@ -368,9 +368,13 @@ defmodule Mobius.Consolidator do
 
   Each resolution's bucket is encoded separately so that loading does not
   re-feed CDPs through the insert path (which would treat them as raw
-  PDPs and corrupt the accumulators). Open accumulators are intentionally
-  not persisted; on load they restart empty and the partial period is
-  discarded.
+  PDPs and corrupt the accumulators).
+
+  Open accumulators are persisted alongside the closed buckets so that
+  partially-aggregated periods survive a restart. This matters most for
+  the day accumulator, where losing the open state would discard up to
+  ~24 hours of in-progress aggregation. On load, accumulators with
+  end timestamps already in the past close on the next sample.
   """
   @spec save(t()) :: iolist()
   def save(state) do
@@ -378,7 +382,10 @@ defmodule Mobius.Consolidator do
       second: CircularBuffer.to_list(state.second),
       minute: CircularBuffer.to_list(state.minute),
       hour: CircularBuffer.to_list(state.hour),
-      day: CircularBuffer.to_list(state.day)
+      day: CircularBuffer.to_list(state.day),
+      open_minute: state.open_minute,
+      open_hour: state.open_hour,
+      open_day: state.open_day
     }
 
     [@serialization_version, :erlang.term_to_iovec(payload)]
@@ -431,13 +438,16 @@ defmodule Mobius.Consolidator do
     {:error, Mobius.DataLoadError.exception(reason: :unsupported_version, who: state)}
   end
 
-  defp do_load(%{second: s, minute: m, hour: h, day: d}, state) do
+  defp do_load(%{second: s, minute: m, hour: h, day: d} = payload, state) do
     loaded = %{
       state
       | second: load_buffer(state.second, s),
         minute: load_buffer(state.minute, m),
         hour: load_buffer(state.hour, h),
-        day: load_buffer(state.day, d)
+        day: load_buffer(state.day, d),
+        open_minute: Map.get(payload, :open_minute, %{}),
+        open_hour: Map.get(payload, :open_hour, %{}),
+        open_day: Map.get(payload, :open_day, %{})
     }
 
     {:ok, loaded}

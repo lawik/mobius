@@ -114,6 +114,7 @@ defmodule Mobius.ConsolidatorTest do
       # accumulator should NOT include the 1000 spike from the first minute.
       open = state.open_minute[{"lat.ms", :summary, %{}}]
       open_stats = Mobius.Summary.calculate(open.summary_data)
+
       assert open_stats.max == 50,
              "second minute's open accumulator should not see minute 1's spike (max=#{open_stats.max})"
     end
@@ -287,6 +288,52 @@ defmodule Mobius.ConsolidatorTest do
       bad = <<99, 1, 2, 3>>
       assert {:error, _} = Consolidator.load(Consolidator.new(@args), bad)
     end
+
+    test "open accumulators survive a save/load round-trip" do
+      # The day accumulator is the one that hurts most to lose: at
+      # save time it may hold up to ~24h of partial aggregation.
+      #
+      # Drive 30 minutes of samples for a counter starting at the top
+      # of an hour. No minute boundary closes the open hour or open
+      # day. Save, load, then verify the next sample emits a CDP that
+      # reflects the events from before AND after the save.
+      base = 1_700_006_400
+
+      state =
+        Enum.reduce(0..(30 * 60 - 1), Consolidator.new(@args), fn offset, st ->
+          Consolidator.insert(st, base + offset, [
+            metric("save.evt.count", :counter, offset + 1)
+          ])
+        end)
+
+      # Open day still has count=1800, first_value=1, last_value=1800.
+      assert state.open_day[{"save.evt.count", :counter, %{}}].count == 1800
+
+      bin = state |> Consolidator.save() |> IO.iodata_to_binary()
+      {:ok, restored} = Consolidator.load(Consolidator.new(@args), bin)
+
+      # The open day accumulator round-trips with the same span.
+      open_before = state.open_day[{"save.evt.count", :counter, %{}}]
+      open_after = restored.open_day[{"save.evt.count", :counter, %{}}]
+
+      assert open_after.first_value == open_before.first_value
+      assert open_after.last_value == open_before.last_value
+      assert open_after.start_ts == open_before.start_ts
+      assert open_after.end_ts == open_before.end_ts
+    end
+
+    test "legacy v3 payloads without open_* fields load with empty open maps" do
+      # Backwards-compat with the first cut of v3, which didn't persist
+      # the open accumulators. We synthesize one of those payloads by
+      # hand to be sure existing on-disk files still load cleanly.
+      legacy_payload = %{second: [], minute: [], hour: [], day: []}
+      legacy_binary = <<3>> <> :erlang.term_to_binary(legacy_payload)
+
+      {:ok, loaded} = Consolidator.load(Consolidator.new(@args), legacy_binary)
+      assert loaded.open_minute == %{}
+      assert loaded.open_hour == %{}
+      assert loaded.open_day == %{}
+    end
   end
 
   describe "CDPs carry their resolution" do
@@ -356,8 +403,7 @@ defmodule Mobius.ConsolidatorTest do
       # v1 stored each metric as {atom_list_name, type, value, tags_map}.
       legacy_samples =
         for offset <- 0..29 do
-          {base + offset,
-           [{[:vm, :memory, :total], :last_value, 2000 + offset, %{}}]}
+          {base + offset, [{[:vm, :memory, :total], :last_value, 2000 + offset, %{}}]}
         end
 
       legacy_binary = <<1>> <> :erlang.term_to_binary(legacy_samples)
