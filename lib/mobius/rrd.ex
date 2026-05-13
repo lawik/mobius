@@ -157,6 +157,17 @@ defmodule Mobius.RRD do
 
       true ->
         Logger.debug("Dropping scrape #{inspect(item)} at #{inspect(ts)}")
+
+        :telemetry.execute(
+          [:mobius, :rrd, :dropped],
+          %{system_time: System.system_time()},
+          %{
+            ts: ts,
+            second_next: rrd.second_next,
+            reason: :timestamp_before_next_boundary
+          }
+        )
+
         rrd
     end
   end

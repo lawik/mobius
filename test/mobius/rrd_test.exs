@@ -134,6 +134,37 @@ defmodule Mobius.RRDTest do
     assert Enum.count(RRD.query(buffer, 0)) == 59 + 48 + 120 + 120
   end
 
+  describe "dropped scrapes" do
+    test "emits telemetry when a scrape is dropped because ts is before second_next" do
+      handler_id = "rrd-dropped-test-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      :telemetry.attach(
+        handler_id,
+        [:mobius, :rrd, :dropped],
+        fn _event, measurements, metadata, _config ->
+          send(test_pid, {:dropped, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      # First insert bootstraps and lands in seconds (ts=100).
+      # Second insert at ts=99 is before second_next=101 → dropped.
+      rrd =
+        RRD.new(@args)
+        |> RRD.insert(100, :first)
+        |> RRD.insert(99, :stale)
+
+      assert CircularBuffer.to_list(rrd.second) == [{100, :first}]
+
+      assert_receive {:dropped, _measurements, metadata}
+      assert metadata.ts == 99
+      assert metadata.reason == :timestamp_before_next_boundary
+    end
+  end
+
   describe "first-insert bootstrap" do
     test "first insert into a fresh RRD lands in the seconds bucket regardless of wall clock" do
       # Previously, all *_next boundaries defaulted to 0 in new/1, so the
