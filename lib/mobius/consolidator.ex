@@ -229,10 +229,10 @@ defmodule Mobius.Consolidator do
   end
 
   defp reporter_consolidate(metric) do
-    # Metric is the cached %Mobius.metric{} map from the scraper, not the
-    # original Telemetry.Metrics struct, so reporter_options can't be
-    # inspected here. Per-metric consolidation override will land via a
-    # follow-up that threads reporter_options through to the scrape map.
+    # The scraper plucks :consolidate out of each metric's
+    # reporter_options at start and attaches it to the scrape map. If
+    # the user didn't set one, default to :avg (arithmetic mean of all
+    # values observed in the period).
     Map.get(metric, :consolidate, :avg)
   end
 

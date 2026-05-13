@@ -70,9 +70,21 @@ defmodule Mobius.Scraper do
     |> Keyword.take([:mobius_instance, :persistence_dir])
     |> Enum.into(%{})
     |> Map.put(:clock, args[:clock_fn] || (&default_clock/0))
+    |> Map.put(:reporter_options, reporter_options_map(args[:metrics] || []))
   end
 
   defp default_clock, do: System.system_time(:second)
+
+  # Index reporter_options by metric name for O(1) lookup at scrape time.
+  # Only :last_value metrics currently honor any reporter_option
+  # (`consolidate: :avg | :max | :min | :last`); other metric types
+  # have fixed consolidation semantics, so we don't bother reading
+  # theirs.
+  defp reporter_options_map(metrics) do
+    Map.new(metrics, fn metric ->
+      {Enum.join(metric.name, "."), metric.reporter_options || []}
+    end)
+  end
 
   defp make_database(state, args) do
     rrd =
@@ -151,7 +163,7 @@ defmodule Mobius.Scraper do
 
       scrape ->
         ts = state.clock.()
-        scrape = scrape_to_metrics_list(ts, scrape)
+        scrape = scrape_to_metrics_list(ts, scrape, state.reporter_options)
         database = Consolidator.insert(state.database, ts, scrape)
 
         {:noreply, %{state | database: database}}
@@ -167,15 +179,20 @@ defmodule Mobius.Scraper do
     save_to_persistence(state)
   end
 
-  defp scrape_to_metrics_list(ts, scrape) do
+  defp scrape_to_metrics_list(ts, scrape, reporter_options) do
     Enum.map(scrape, fn {name, type, value, tags} ->
-      %{
+      base = %{
         timestamp: ts,
         name: name,
         type: type,
         value: value,
         tags: tags
       }
+
+      case Keyword.get(reporter_options[name] || [], :consolidate) do
+        nil -> base
+        fun -> Map.put(base, :consolidate, fun)
+      end
     end)
   end
 
