@@ -70,13 +70,19 @@ defmodule Mobius.Consolidator do
   @doc """
   Create a new consolidator.
 
-  Resolution sizes are independent. Defaults match the previous RRD:
-  60 days, 48 hours, 120 minutes, 120 seconds.
+  Resolution sizes are independent. Defaults:
+
+    * `:seconds` - 180 (three minutes of headroom so the stitched read
+      path can always serve the most-recently-closed minute CDP without
+      a one-second boundary gap; see `all/1` for the reasoning)
+    * `:minutes` - 120
+    * `:hours` - 48
+    * `:days` - 60
   """
   @spec new([create_opt()]) :: t()
   def new(opts \\ []) do
     %{
-      second: CircularBuffer.new(opts[:seconds] || 120),
+      second: CircularBuffer.new(opts[:seconds] || 180),
       minute: CircularBuffer.new(opts[:minutes] || 120),
       hour: CircularBuffer.new(opts[:hours] || 48),
       day: CircularBuffer.new(opts[:days] || 60),
@@ -232,20 +238,51 @@ defmodule Mobius.Consolidator do
   @doc """
   Return all stored items across all resolutions, sorted by timestamp.
 
+  The four buckets cover overlapping time ranges by design (the seconds
+  bucket holds the last N seconds; the minute bucket holds CDPs for
+  every closed minute including those still represented in the seconds
+  bucket). This function stitches them into a single non-overlapping
+  series: the finest available resolution wins for each part of the
+  timeline.
+
+  A coarser-resolution CDP is included only when its entire period is
+  strictly older than the earliest sample in the next-finer bucket.
+  With default sizing (seconds=180, minutes=120, hours=48, days=60),
+  every finer bucket always extends past one full period of the coarser
+  bucket above it, so no gap appears at boundaries.
+
   Open accumulators are *not* included — they only appear after their
   period closes.
   """
   @spec all(t()) :: [{integer(), [Mobius.metric()]}]
   def all(state) do
-    (CircularBuffer.to_list(state.day) ++
-       CircularBuffer.to_list(state.hour) ++
-       CircularBuffer.to_list(state.minute) ++
-       CircularBuffer.to_list(state.second))
-    |> Enum.sort_by(fn {ts, _} -> ts end)
+    seconds = CircularBuffer.to_list(state.second)
+    minutes = CircularBuffer.to_list(state.minute)
+    hours = CircularBuffer.to_list(state.hour)
+    days = CircularBuffer.to_list(state.day)
+
+    seconds_lb = oldest_ts(seconds)
+    minutes = strictly_older_than(minutes, seconds_lb, 60)
+    minutes_lb = oldest_ts(minutes) || seconds_lb
+    hours = strictly_older_than(hours, minutes_lb, 3600)
+    hours_lb = oldest_ts(hours) || minutes_lb
+    days = strictly_older_than(days, hours_lb, 86400)
+
+    days ++ hours ++ minutes ++ seconds
+  end
+
+  # CircularBuffer.to_list returns oldest first.
+  defp oldest_ts([{ts, _} | _]), do: ts
+  defp oldest_ts([]), do: nil
+
+  defp strictly_older_than(items, nil, _period), do: items
+
+  defp strictly_older_than(items, cutoff, period) do
+    Enum.filter(items, fn {ts, _} -> ts + period <= cutoff end)
   end
 
   @doc """
-  Return all stored items with timestamps >= `from`.
+  Return all stored items with timestamps >= `from`, stitched as in `all/1`.
   """
   @spec query(t(), integer()) :: [{integer(), [Mobius.metric()]}]
   def query(state, from) do
@@ -253,7 +290,7 @@ defmodule Mobius.Consolidator do
   end
 
   @doc """
-  Return all stored items with timestamps in `[from, to]`.
+  Return all stored items with timestamps in `[from, to]`, stitched as in `all/1`.
   """
   @spec query(t(), integer(), integer()) :: [{integer(), [Mobius.metric()]}]
   def query(state, from, to) do

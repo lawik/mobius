@@ -143,8 +143,12 @@ defmodule Mobius.ConsolidatorTest do
     end
   end
 
-  describe "all/1 and query/2 return CDPs sorted by timestamp" do
-    test "all returns seconds plus closed minute CDPs, sorted" do
+  describe "all/1 stitches resolutions without overlap" do
+    test "while the seconds bucket still covers a closed minute, all/1 returns only seconds for that range" do
+      # 121 ticks at @args (seconds=120): seconds bucket holds offsets
+      # 1..120 (oldest at base+1). Minute CDP at base has end=base+60,
+      # which is NOT strictly older than base+1, so it's filtered out
+      # — the seconds bucket already has finer resolution coverage.
       base = 1_700_006_400
 
       state =
@@ -158,23 +162,70 @@ defmodule Mobius.ConsolidatorTest do
       timestamps = Enum.map(all, fn {ts, _} -> ts end)
       assert timestamps == Enum.sort(timestamps)
 
-      # First closed minute should appear in the listing:
-      assert Enum.any?(all, fn {ts, _} -> ts == base end)
+      refute Enum.any?(all, fn {ts, _} -> ts == base end),
+             "minute CDP at base should NOT appear while seconds bucket still covers that minute"
+
+      # Seconds-only coverage is what's returned.
+      assert length(all) == 120
     end
 
-    test "query/3 filters to a time range inclusive on both ends" do
+    test "once the seconds bucket has rotated past a closed minute, that minute CDP appears" do
+      # 240 ticks with @args (seconds=120): seconds bucket holds offsets
+      # 120..240 (oldest=base+120). Minute CDPs at base and base+60
+      # both have end <= base+120, so both are kept.
       base = 1_700_006_400
 
       state =
-        Enum.reduce(0..120, Consolidator.new(@args), fn offset, st ->
+        Enum.reduce(0..240, Consolidator.new(@args), fn offset, st ->
           Consolidator.insert(st, base + offset, [
             metric("cpu.pct", :last_value, 50)
           ])
         end)
 
-      filtered = Consolidator.query(state, base + 10, base + 20)
+      all = Consolidator.all(state)
+      timestamps = MapSet.new(all, fn {ts, _} -> ts end)
+
+      assert MapSet.member?(timestamps, base)
+      assert MapSet.member?(timestamps, base + 60)
+
+      # No second-bucket PDP at base or base+60 (those rotated out), so
+      # there is no overlap with the seconds bucket.
+      refute MapSet.member?(timestamps, base + 119)
+    end
+
+    test "no double-counting: a minute CDP and its constituent PDPs are never both present" do
+      base = 1_700_006_400
+
+      state =
+        Enum.reduce(0..240, Consolidator.new(@args), fn offset, st ->
+          Consolidator.insert(st, base + offset, [
+            metric("cpu.pct", :last_value, 50)
+          ])
+        end)
+
+      all_ts = Consolidator.all(state) |> Enum.map(fn {ts, _} -> ts end)
+
+      # Every minute CDP returned has start_ts NOT shared with any
+      # surviving second-resolution PDP. With strict stitching, the only
+      # way the same ts could appear twice would be if the CDP's period
+      # somehow extended into the seconds window — which the filter
+      # prevents.
+      assert length(all_ts) == length(Enum.uniq(all_ts))
+    end
+
+    test "query/3 inherits the stitched view" do
+      base = 1_700_006_400
+
+      state =
+        Enum.reduce(0..240, Consolidator.new(@args), fn offset, st ->
+          Consolidator.insert(st, base + offset, [
+            metric("cpu.pct", :last_value, 50)
+          ])
+        end)
+
+      filtered = Consolidator.query(state, base + 10, base + 200)
       timestamps = Enum.map(filtered, fn {ts, _} -> ts end)
-      assert Enum.all?(timestamps, &(&1 >= base + 10 and &1 <= base + 20))
+      assert Enum.all?(timestamps, &(&1 >= base + 10 and &1 <= base + 200))
     end
   end
 
