@@ -69,8 +69,24 @@ defmodule Mobius.Scraper do
     args
     |> Keyword.take([:mobius_instance, :persistence_dir])
     |> Enum.into(%{})
-    |> Map.put(:clock, args[:clock_fn] || (&default_clock/0))
+    |> Map.put(:clock, clock_fn(args[:clock]))
     |> Map.put(:reporter_options, reporter_options_map(args[:metrics] || []))
+  end
+
+  # Pick the time source for scrape timestamps.
+  #
+  # If the configured `:clock` module implements the optional
+  # `Mobius.Clock.now/0` callback, the scraper reads time through it.
+  # Otherwise — including the typical NervesTime case where the module
+  # only implements `synchronized?/0` — fall back to the system clock.
+  defp clock_fn(nil), do: &default_clock/0
+
+  defp clock_fn(module) when is_atom(module) do
+    if Code.ensure_loaded?(module) and function_exported?(module, :now, 0) do
+      &module.now/0
+    else
+      &default_clock/0
+    end
   end
 
   defp default_clock, do: System.system_time(:second)

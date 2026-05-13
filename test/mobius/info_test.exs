@@ -15,9 +15,8 @@ defmodule Mobius.InfoTest do
   test "info/0 prints summary statistics from the latest closed minute CDP, not the now-degenerate metrics table",
        %{tmp_dir: tmp_dir} do
     metric = Telemetry.Metrics.summary("info_test.lat.ms")
-    {:ok, clock_agent} = Agent.start_link(fn -> 1_700_006_400 end)
-    clock_fn = fn -> Agent.get(clock_agent, & &1) end
-    advance = fn n -> Agent.update(clock_agent, &(&1 + n)) end
+    {:ok, _} = start_supervised({Mobius.ManualClock, 1_700_006_400})
+    advance = &Mobius.ManualClock.advance/1
 
     instance = :"info_test_#{System.unique_integer([:positive])}"
 
@@ -25,7 +24,7 @@ defmodule Mobius.InfoTest do
       metrics: [metric],
       mobius_instance: instance,
       persistence_dir: tmp_dir,
-      clock_fn: clock_fn
+      clock: Mobius.ManualClock
     ]
 
     {:ok, _pid} = start_supervised({Mobius, args})

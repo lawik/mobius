@@ -15,13 +15,8 @@ defmodule Mobius.Exports.DeltaRateAggregateTest do
   defp start_pipeline(metric_specs, tmp_dir) do
     test_id = System.unique_integer([:positive])
     instance = :"exports_helpers_#{test_id}"
-    {:ok, clock_agent} = Agent.start_link(fn -> 1_700_006_400 end)
 
-    clock_fn = fn -> Agent.get(clock_agent, & &1) end
-
-    advance = fn n ->
-      Agent.update(clock_agent, fn t -> t + n end)
-    end
+    {:ok, _} = start_supervised({Mobius.ManualClock, 1_700_006_400})
 
     metrics =
       Enum.map(metric_specs, fn
@@ -33,7 +28,7 @@ defmodule Mobius.Exports.DeltaRateAggregateTest do
       metrics: metrics,
       mobius_instance: instance,
       persistence_dir: tmp_dir,
-      clock_fn: clock_fn
+      clock: Mobius.ManualClock
     ]
 
     {:ok, _pid} = start_supervised({Mobius, args})
@@ -46,7 +41,7 @@ defmodule Mobius.Exports.DeltaRateAggregateTest do
       :ok
     end
 
-    %{instance: instance, advance: advance, scrape: scrape}
+    %{instance: instance, advance: &Mobius.ManualClock.advance/1, scrape: scrape}
   end
 
   @tag :tmp_dir

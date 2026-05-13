@@ -110,14 +110,13 @@ defmodule Mobius.ReporterOptionsTest do
 
       instance = :"ropts_plumb_#{System.unique_integer([:positive])}"
 
-      {:ok, clock_agent} = Agent.start_link(fn -> 1_700_006_400 end)
-      clock_fn = fn -> Agent.get(clock_agent, & &1) end
+      {:ok, _} = start_supervised({Mobius.ManualClock, 1_700_006_400})
 
       args = [
         metrics: [metric_def],
         mobius_instance: instance,
         persistence_dir: tmp_dir,
-        clock_fn: clock_fn
+        clock: Mobius.ManualClock
       ]
 
       {:ok, _pid} = start_supervised({Mobius, args})
@@ -138,14 +137,13 @@ defmodule Mobius.ReporterOptionsTest do
 
       instance = :"ropts_plain_#{System.unique_integer([:positive])}"
 
-      {:ok, clock_agent} = Agent.start_link(fn -> 1_700_006_400 end)
-      clock_fn = fn -> Agent.get(clock_agent, & &1) end
+      {:ok, _} = start_supervised({Mobius.ManualClock, 1_700_006_400})
 
       args = [
         metrics: [metric_def],
         mobius_instance: instance,
         persistence_dir: tmp_dir,
-        clock_fn: clock_fn
+        clock: Mobius.ManualClock
       ]
 
       {:ok, _pid} = start_supervised({Mobius, args})

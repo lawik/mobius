@@ -4,15 +4,11 @@ defmodule Mobius.ScraperTest do
   alias Mobius.Scraper
 
   @tag :tmp_dir
-  test "scrape uses the injected clock_fn for the timestamp", %{tmp_dir: tmp_dir} do
-    # Drive time deterministically. Two scrapes one second apart; both
-    # land in the same minute so the consolidator doesn't emit a CDP
-    # we'd have to account for in the assertion.
-    {:ok, agent} = Agent.start_link(fn -> 1_700_000_000 end)
-
-    clock_fn = fn ->
-      Agent.get_and_update(agent, fn t -> {t, t + 1} end)
-    end
+  test "scrape reads timestamps from the configured Mobius.Clock", %{tmp_dir: tmp_dir} do
+    # Drive time deterministically through `Mobius.Clock.now/0`. Two
+    # scrapes one second apart; both land in the same minute so the
+    # consolidator doesn't emit a CDP we'd have to account for.
+    {:ok, _} = start_supervised({Mobius.ManualClock, 1_700_000_000})
 
     metric = Telemetry.Metrics.counter("scraper_test.evt.count")
     instance = :"scraper_test_#{System.unique_integer([:positive])}"
@@ -21,17 +17,17 @@ defmodule Mobius.ScraperTest do
       metrics: [metric],
       mobius_instance: instance,
       persistence_dir: tmp_dir,
-      clock_fn: clock_fn
+      clock: Mobius.ManualClock
     ]
 
     {:ok, _pid} = start_supervised({Mobius, args})
 
     :telemetry.execute([:scraper_test, :evt], %{count: 1}, %{})
 
-    # Drive two scrapes manually so we don't depend on wall time.
     scraper_pid = Process.whereis(Module.concat(Scraper, instance))
     send(scraper_pid, :scrape)
     :sys.get_state(scraper_pid)
+    Mobius.ManualClock.advance(1)
     send(scraper_pid, :scrape)
     :sys.get_state(scraper_pid)
 

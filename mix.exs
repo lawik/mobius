@@ -9,6 +9,7 @@ defmodule Mobius.MixProject do
       version: @version,
       elixir: "~> 1.11",
       start_permanent: Mix.env() == :prod,
+      elixirc_paths: elixirc_paths(Mix.env()),
       aliases: aliases(),
       deps: deps(),
       dialyzer: dialyzer(),
@@ -18,6 +19,9 @@ defmodule Mobius.MixProject do
       preferred_cli_env: [docs: :docs, "hex.publish": :docs]
     ]
   end
+
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_), do: ["lib"]
 
   # Run "mix help compile.app" to learn about applications.
   def application do
