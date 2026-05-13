@@ -349,14 +349,42 @@ defmodule Mobius.Consolidator do
   @doc """
   Load a serialized binary back into a fresh state.
 
-  The state passed in supplies the bucket capacities; loaded data is
-  inserted directly into the matching CircularBuffers.
+  Three formats are accepted:
+
+    * version 3 — the native consolidator format; restored directly.
+    * version 2 — legacy Mobius.RRD format; each stored sample is fed
+      through `insert/3`. Old per-second samples land in the seconds
+      bucket; old per-minute / per-hour / per-day samples open and
+      close accumulators with a single PDP each, so the value at each
+      old boundary is preserved as a degenerate CDP and the
+      consolidator continues normally from there.
+    * version 1 — legacy Mobius.RRD format with tuple-shaped metrics;
+      migrated to the v2 map shape, then loaded as above.
+
+  The state passed in supplies the bucket capacities.
   """
   @spec load(t(), binary()) :: {:ok, t()} | {:error, Mobius.DataLoadError.t()}
   def load(state, <<@serialization_version, data::binary>>) do
     data
     |> :erlang.binary_to_term()
     |> do_load(state)
+  catch
+    _, _ -> {:error, Mobius.DataLoadError.exception(reason: :corrupt, who: state)}
+  end
+
+  def load(state, <<2, data::binary>>) do
+    data
+    |> :erlang.binary_to_term()
+    |> do_load_legacy(state)
+  catch
+    _, _ -> {:error, Mobius.DataLoadError.exception(reason: :corrupt, who: state)}
+  end
+
+  def load(state, <<1, data::binary>>) do
+    data
+    |> :erlang.binary_to_term()
+    |> migrate_v1_to_v2()
+    |> do_load_legacy(state)
   catch
     _, _ -> {:error, Mobius.DataLoadError.exception(reason: :corrupt, who: state)}
   end
@@ -378,6 +406,36 @@ defmodule Mobius.Consolidator do
   end
 
   defp do_load(_, _state), do: throw(:bad_payload)
+
+  defp do_load_legacy(data, state) when is_list(data) do
+    loaded =
+      Enum.reduce(data, state, fn {ts, metrics}, st ->
+        insert(st, ts, metrics)
+      end)
+
+    {:ok, loaded}
+  end
+
+  defp do_load_legacy(_, _state), do: throw(:bad_payload)
+
+  # v1 stored each metric as `{atom_list_name, type, value, tags_map}`;
+  # v2 uses `%{name: dotted_string, type:, value:, tags:, timestamp:}`.
+  defp migrate_v1_to_v2(data) do
+    Enum.map(data, fn {ts, metrics} ->
+      metrics =
+        Enum.map(metrics, fn {name, type, value, tags} ->
+          %{
+            name: Enum.join(name, "."),
+            type: type,
+            value: value,
+            tags: tags,
+            timestamp: ts
+          }
+        end)
+
+      {ts, metrics}
+    end)
+  end
 
   defp load_buffer(empty, items) do
     Enum.reduce(items, empty, fn item, buf -> CircularBuffer.insert(buf, item) end)

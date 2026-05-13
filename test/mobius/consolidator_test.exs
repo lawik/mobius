@@ -288,4 +288,95 @@ defmodule Mobius.ConsolidatorTest do
       assert {:error, _} = Consolidator.load(Consolidator.new(@args), bad)
     end
   end
+
+  describe "legacy on-disk formats" do
+    test "loads a v2 (legacy Mobius.RRD) file by replaying samples through insert/3" do
+      # Hand-build a v2-format binary: <<2, encoded_list>> where the
+      # list is [{ts, [metric_map]}, ...]. This matches what the
+      # removed Mobius.RRD.save/2 used to emit at the v2 default.
+      base = 1_700_006_400
+
+      legacy_samples =
+        for offset <- 0..59 do
+          {base + offset,
+           [
+             %{
+               name: "vm.memory.total",
+               type: :last_value,
+               value: 1000 + offset,
+               tags: %{},
+               timestamp: base + offset
+             }
+           ]}
+        end
+
+      legacy_binary = <<2>> <> :erlang.term_to_binary(legacy_samples)
+
+      {:ok, loaded} = Consolidator.load(Consolidator.new(@args), legacy_binary)
+
+      # All 60 old per-second samples are present in the seconds bucket.
+      seconds = CircularBuffer.to_list(loaded.second)
+      assert length(seconds) == 60
+
+      # Most-recent looked-up value matches what was in the legacy file.
+      latest = Consolidator.latest_for(loaded, "vm.memory.total", :last_value, %{})
+      assert latest.value == 1059
+      assert latest.timestamp == base + 59
+    end
+
+    test "loads a v1 (legacy tuple-shaped) file after migrating tuple → map" do
+      base = 1_700_006_400
+
+      # v1 stored each metric as {atom_list_name, type, value, tags_map}.
+      legacy_samples =
+        for offset <- 0..29 do
+          {base + offset,
+           [{[:vm, :memory, :total], :last_value, 2000 + offset, %{}}]}
+        end
+
+      legacy_binary = <<1>> <> :erlang.term_to_binary(legacy_samples)
+
+      {:ok, loaded} = Consolidator.load(Consolidator.new(@args), legacy_binary)
+
+      latest = Consolidator.latest_for(loaded, "vm.memory.total", :last_value, %{})
+      assert latest.value == 2029
+    end
+
+    test "fresh scrapes continue to consolidate after a legacy load" do
+      base = 1_700_006_400
+
+      # One sample per second for the first 30 seconds of a minute,
+      # loaded from v2. Then we resume with new ticks for the remaining
+      # 30 seconds. At second 60, the minute accumulator closes and
+      # emits a CDP that includes ALL 60 samples (loaded + fresh).
+      legacy_samples =
+        for offset <- 0..29 do
+          {base + offset,
+           [
+             %{
+               name: "cpu.pct",
+               type: :last_value,
+               value: 10,
+               tags: %{},
+               timestamp: base + offset
+             }
+           ]}
+        end
+
+      legacy_binary = <<2>> <> :erlang.term_to_binary(legacy_samples)
+      {:ok, state} = Consolidator.load(Consolidator.new(@args), legacy_binary)
+
+      state =
+        Enum.reduce(30..60, state, fn offset, st ->
+          Consolidator.insert(st, base + offset, [
+            metric("cpu.pct", :last_value, 90)
+          ])
+        end)
+
+      [{ts, [cdp]}] = CircularBuffer.to_list(state.minute)
+      assert ts == base
+      # 30 samples of 10, 30 samples of 90 → avg = 50.
+      assert_in_delta cdp.value, 50.0, 0.001
+    end
+  end
 end
