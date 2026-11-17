@@ -67,6 +67,14 @@ any time. The public API SHOULD NOT be considered stable.
   The values are no longer returned from `Mobius.Exports.metrics/4` for the
   `summary` type.
 
+### Fixes
+
+* Summary `std_dev` for values that are large compared with their spread,
+  such as `system_time` measurements. The variance calculation lost all
+  precision there and returned rounding noise: an `ArithmeticError` from
+  `:math.sqrt/1`, `0.0`, or a large wrong value. Integer measurements are
+  now exact. (#152)
+
 ## [v0.7.0] - 2026-05-21
 
 ### Changed
